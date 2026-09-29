@@ -1,0 +1,27 @@
+# Datasets and projected features
+dataset/scannet_v2/
+dataset/scannet200/
+dataset/scannetpp/
+
+# Checkpoints and experiment outputs
+checkpoints/
+outputs/
+exps/
+*.pth
+*.pt
+*.ckpt
+*.log
+
+# Python and build artifacts
+__pycache__/
+*.py[cod]
+build/
+*.so
+*.o
+*.a
+.pytest_cache/
+
+# Editors and local environments
+.DS_Store
+.vscode/
+.idea/
