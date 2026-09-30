@@ -1,103 +1,122 @@
 import argparse
 import datetime
-import gorilla
 import os
 import os.path as osp
 import shutil
+import sys
 import time
+from _runtime_env import assert_cuda_torch, configure_spconv_runtime, preload_current_env_torch_libs
+
+ROOT_DIR = osp.dirname(osp.dirname(osp.abspath(__file__)))
+LIB_DIR = osp.join(ROOT_DIR, 'relation3d', 'lib')
+for _path in (ROOT_DIR, LIB_DIR):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+preload_current_env_torch_libs()
+
+import gorilla
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
+assert_cuda_torch(torch)
+configure_spconv_runtime(torch)
+
 from relation3d.dataset import build_dataloader, build_dataset
-from relation3d.evaluation import ScanNetEval
-from relation3d.utils import AverageMeter, get_root_logger, colors, rle_decode, write_obj
-import numpy as np
+from relation3d.evaluation import ScanNet200Eval, ScanNetEval
+from relation3d.utils import AverageMeter, get_root_logger
+from relation3d.model.dataset_2d_feats import (
+    wrap_dataset_with_2d_feats,
+    collate_fn_wrapper,
+)
 
 
-def load_compatible_pretrain(model, checkpoint_path, logger):
-    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-    if isinstance(checkpoint, dict) and 'model' in checkpoint:
-        state_dict = checkpoint['model']
-    elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-        state_dict = checkpoint['state_dict']
+
+def setup_distributed():
+    """Documentation."""
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+        dist.init_process_group(backend='nccl')
+        torch.cuda.set_device(local_rank)
+        return rank, world_size, local_rank
     else:
-        state_dict = checkpoint
+        return 0, 1, 0
 
-    model_state = model.state_dict()
-    compatible = {}
-    skipped = []
-    for key, value in state_dict.items():
-        model_key = key[7:] if key.startswith('module.') else key
-        if (
-            model_key in model_state
-            and hasattr(value, 'shape')
-            and model_state[model_key].shape == value.shape
-        ):
-            compatible[model_key] = value
-        else:
-            skipped.append(model_key)
-    missing, unexpected = model.load_state_dict(compatible, strict=False)
-    logger.info(
-        f'Loaded {len(compatible)} compatible tensors from {checkpoint_path}; '
-        f'skipped {len(skipped)}, missing {len(missing)}, unexpected {len(unexpected)}'
-    )
+
+def is_main_process():
+    if not dist.is_initialized():
+        return True
+    return dist.get_rank() == 0
+
+
+def get_model(model):
+    """Documentation."""
+    if isinstance(model, DDP):
+        return model.module
+    return model
+
+
+def reduce_tensor(tensor):
+    """Documentation."""
+    if not dist.is_initialized():
+        return tensor
+    rt = tensor.clone()
+    dist.all_reduce(rt, op=dist.ReduceOp.SUM)
+    rt /= dist.get_world_size()
+    return rt
+
 
 
 def get_args():
-    parser = argparse.ArgumentParser('SPFormer')
+    parser = argparse.ArgumentParser('Relation3D Training (DDP)')
     parser.add_argument('config', type=str, help='path to config file')
     parser.add_argument('--resume', type=str, help='path to resume from')
     parser.add_argument('--work_dir', type=str, help='working directory')
-    parser.add_argument('--skip_validate', action='store_true', help='skip validation')
-    parser.add_argument('--eval_only', action='store_true', help='skip validation')
-    args = parser.parse_args()
-    return args
+    parser.add_argument('--seed', type=int, help='override train and test random seed')
+    parser.add_argument('--skip_validate', action='store_true')
+    parser.add_argument('--eval_only', action='store_true')
+    return parser.parse_args()
 
 
-def train(epoch, model, dataloader, optimizer, lr_scheduler, cfg, logger, writer):
+def train(epoch, model, dataloader, optimizer, lr_scheduler, cfg, logger, writer, sampler):
     model.train()
+    if sampler is not None:
+        sampler.set_epoch(epoch)
+
     iter_time = AverageMeter()
     data_time = AverageMeter()
     meter_dict = {}
     end = time.time()
-    model.epoch = epoch
+    get_model(model).epoch = epoch
+
     for i, batch in enumerate(dataloader, start=1):
         data_time.update(time.time() - end)
 
-        if cfg.train.get("append_epoch", False):
-            batch['epoch'] = epoch
-
-        if cfg.train.get("use_rgb", True) == False:
-            batch['feats'] = batch['feats'][:, 3:]
-
-        if cfg.model_name.startswith("SPFormer"):
-            batch.pop("coords_float", "")
-
-        if (not cfg.model_name.endswith("no_superpoint")) and cfg.train.get("use_batch_points_offsets", False) == False:
-            batch.pop("batch_points_offsets", "")
-
         loss, log_vars = model(batch, mode='loss')
 
-        # meter_dict
         for k, v in log_vars.items():
-            if k not in meter_dict.keys():
+            if k not in meter_dict:
                 meter_dict[k] = AverageMeter()
             meter_dict[k].update(v)
 
-        # backward
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        # time and print
         remain_iter = len(dataloader) * (cfg.train.epochs - epoch + 1) - i
         iter_time.update(time.time() - end)
         end = time.time()
-        remain_time = remain_iter * iter_time.avg
-        remain_time = str(datetime.timedelta(seconds=int(remain_time)))
+        remain_time = str(datetime.timedelta(seconds=int(remain_iter * iter_time.avg)))
         lr = optimizer.param_groups[0]['lr']
-        if i % 10 == 0:
+
+        if i % 10 == 0 and is_main_process():
             log_str = f'Epoch [{epoch}/{cfg.train.epochs}][{i}/{len(dataloader)}]  '
             log_str += f'lr: {lr:.2g}, eta: {remain_time}, '
             log_str += f'data_time: {data_time.val:.2f}, iter_time: {iter_time.val:.2f}'
@@ -105,134 +124,251 @@ def train(epoch, model, dataloader, optimizer, lr_scheduler, cfg, logger, writer
                 log_str += f', {k}: {v.val:.4f}'
             logger.info(log_str)
 
-    # update lr
     lr_scheduler.step()
     lr = optimizer.param_groups[0]['lr']
 
-    # log and save
-    writer.add_scalar('train/learning_rate', lr, epoch)
-    for k, v in meter_dict.items():
-        writer.add_scalar(f'train/{k}', v.avg, epoch)
-    save_file = osp.join(cfg.work_dir, 'lastest.pth')
-    meta = dict(epoch=epoch)
-    gorilla.save_checkpoint(model, save_file, optimizer, lr_scheduler, meta)
+    if is_main_process():
+        writer.add_scalar('train/learning_rate', lr, epoch)
+        for k, v in meter_dict.items():
+            writer.add_scalar(f'train/{k}', v.avg, epoch)
+
+        save_file = osp.join(cfg.work_dir, 'lastest.pth')
+        meta = dict(epoch=epoch)
+        gorilla.save_checkpoint(get_model(model), save_file, optimizer, lr_scheduler, meta)
 
 
 @torch.no_grad()
 def eval(epoch, model, dataloader, cfg, logger, writer):
-    logger.info('Validation')
+    if is_main_process():
+        logger.info('Validation')
+
     pred_insts, gt_insts = [], []
-    progress_bar = tqdm(total=len(dataloader))
+    progress_bar = tqdm(total=len(dataloader)) if is_main_process() else None
     val_dataset = dataloader.dataset
 
     model.eval()
     for batch in dataloader:
-
-        # batch.pop("batch_points_offsets", "")
-
         result = model(batch, mode='predict')
         pred_insts.append(result['pred_instances'])
         gt_insts.append(result['gt_instances'])
-        progress_bar.update()
-    progress_bar.close()
+        if progress_bar is not None:
+            progress_bar.update()
+    if progress_bar is not None:
+        progress_bar.close()
 
-    # evaluate
-    logger.info('Evaluate instance segmentation')
-    scannet_eval = ScanNetEval(val_dataset.CLASSES)
-    try:
-        #scannet_eval.evaluate_box(pred_insts, coords, sem_labels, ins_labels)
-        eval_res = scannet_eval.evaluate(pred_insts, gt_insts)
-        writer.add_scalar('val/AP', eval_res['all_ap'], epoch)
-        writer.add_scalar('val/AP_50', eval_res['all_ap_50%'], epoch)
-        writer.add_scalar('val/AP_25', eval_res['all_ap_25%'], epoch)
-        logger.info('AP: {:.3f}. AP_50: {:.3f}. AP_25: {:.3f}'.format(eval_res['all_ap'], eval_res['all_ap_50%'],
-                                                                    eval_res['all_ap_25%']))
-    except Exception as e:
-        logger.info(str(e))
-        eval_res = {'all_ap': 0.0, 'all_ap_50%': 0.0, 'all_ap_25%': 0.0}
+    eval_res = {'all_ap': 0.0, 'all_ap_50%': 0.0, 'all_ap_25%': 0.0}
+    if is_main_process():
+        logger.info('Evaluate instance segmentation')
+        val_data_cfg = cfg.data.get('val', {})
+        if val_data_cfg.get('type') == 'scannet200':
+            scannet_eval = ScanNet200Eval(val_dataset.CLASSES)
+        else:
+            scannet_eval = ScanNetEval(val_dataset.CLASSES)
+        try:
+            eval_res = scannet_eval.evaluate(pred_insts, gt_insts)
+            writer.add_scalar('val/AP', eval_res['all_ap'], epoch)
+            writer.add_scalar('val/AP_50', eval_res['all_ap_50%'], epoch)
+            writer.add_scalar('val/AP_25', eval_res['all_ap_25%'], epoch)
+            logger.info('AP: {:.3f}. AP_50: {:.3f}. AP_25: {:.3f}'.format(
+                eval_res['all_ap'], eval_res['all_ap_50%'], eval_res['all_ap_25%']))
+        except Exception as e:
+            logger.info(str(e))
+
+    if dist.is_initialized():
+        ap_tensor = torch.tensor([eval_res['all_ap']], device='cuda')
+        dist.broadcast(ap_tensor, src=0)
+        eval_res['all_ap'] = ap_tensor.item()
+
     return eval_res
 
-def get_model(cfg, model_name):
-    if model_name == 'Relation3D':
-        from relation3d.model import Relation3D
-        model = Relation3D(**cfg.model).cuda()
-    else:
-        raise NotImplementedError()
-    return model
 
 def main():
     args = get_args()
+    rank, world_size, local_rank = setup_distributed()
+
     cfg = gorilla.Config.fromfile(args.config)
+
+    if args.seed is not None:
+        cfg.train.seed = args.seed
+        cfg.test.seed = args.seed
+
     if args.work_dir:
         cfg.work_dir = args.work_dir
+    elif cfg.get('work_dir', None):
+        cfg.work_dir = cfg.work_dir
     else:
-        cfg.work_dir = osp.join('./exps9', osp.splitext(osp.basename(args.config))[0])
-    os.makedirs(osp.abspath(cfg.work_dir), exist_ok=True)
+        cfg.work_dir = osp.join('./exps_relation3d',
+                                osp.splitext(osp.basename(args.config))[0])
+
+    if is_main_process():
+        os.makedirs(osp.abspath(cfg.work_dir), exist_ok=True)
+
+    if dist.is_initialized():
+        dist.barrier()
+
     timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
-    log_file = osp.join(cfg.work_dir, f'{timestamp}.log')
+    log_file = osp.join(cfg.work_dir, f'{timestamp}_rank{rank}.log')
     logger = get_root_logger(log_file=log_file)
-    logger.info(f'config: {args.config}')
-    shutil.copy(args.config, osp.join(cfg.work_dir, osp.basename(args.config)))
-    writer = SummaryWriter(cfg.work_dir)
 
-    # seed
-    gorilla.set_random_seed(cfg.train.seed)
+    if is_main_process():
+        logger.info(f'config: {args.config}')
+        logger.info(f'world_size: {world_size}, rank: {rank}, local_rank: {local_rank}')
+        shutil.copy(args.config, osp.join(cfg.work_dir, osp.basename(args.config)))
 
-    logger.info(cfg)
+    writer = SummaryWriter(cfg.work_dir) if is_main_process() else None
 
-    # model
-    model_name = cfg.model.pop("name", "Relation3D")
-    model = get_model(cfg, model_name)
+    gorilla.set_random_seed(cfg.train.seed + rank)
+    if is_main_process():
+        logger.info(cfg)
+
+    # ---- Model ----
+    model_cfg = dict(cfg.model)
+    model_name = model_cfg.pop('name', 'Relation3D')
+    if model_name == 'Relation3D':
+        from relation3d.model.relation3d import Relation3D as ModelClass
+    else:
+        raise ValueError(f'Unsupported model.name: {model_name}')
+
+    model = ModelClass(**model_cfg).cuda()
     cfg.model_name = model_name
 
-    logger.info(model)
+    if is_main_process():
+        logger.info(model)
+        count_parameters = gorilla.parameter_count(model)['']
+        logger.info(f'Parameters: {count_parameters / 1e6:.2f}M')
 
-    count_parameters = gorilla.parameter_count(model)['']
-    logger.info(f'Parameters: {count_parameters / 1e6:.2f}M')
-
-    # optimizer and scheduler
     optimizer = gorilla.build_optimizer(model, cfg.optimizer)
     lr_scheduler = gorilla.build_lr_scheduler(optimizer, cfg.lr_scheduler)
 
-    # pretrain or resume
+    # ---- Pretrain / Resume ----
     start_epoch = 1
     if args.resume:
-        logger.info(f'Resume from {args.resume}')
-        meta = gorilla.resume(model, args.resume, optimizer, lr_scheduler)
-        start_epoch = meta['epoch']
-    elif cfg.train.pretrain:
-        logger.info(f'Load pretrain from {cfg.train.pretrain}')
-        load_compatible_pretrain(model, cfg.train.pretrain, logger)
-        
-    # train and val dataset
-    train_dataset = build_dataset(cfg.data.train, logger)
+        if is_main_process():
+            logger.info(f'Resume from {args.resume}')
+        if args.eval_only:
+            ckpt = torch.load(args.resume, map_location='cpu')
+            if 'model' in ckpt:
+                state_dict = ckpt['model']
+                meta = ckpt.get('meta', {})
+            elif 'state_dict' in ckpt:
+                state_dict = ckpt['state_dict']
+                meta = ckpt.get('meta', {})
+            else:
+                state_dict = ckpt
+                meta = {}
+            missing, unexpected = model.load_state_dict(state_dict, strict=False)
+            if is_main_process():
+                logger.info(f'Loaded model-only checkpoint for eval. '
+                            f'Missing: {len(missing)}, Unexpected: {len(unexpected)}')
+        else:
+            meta = gorilla.resume(model, args.resume, optimizer, lr_scheduler)
+            if isinstance(meta, dict) and 'epoch' in meta:
+                start_epoch = meta['epoch'] + 1
+        if isinstance(meta, dict) and 'stage' in meta and hasattr(model, 'set_stage'):
+            model.set_stage(meta['stage'])
+            if is_main_process():
+                logger.info(f'Set model stage from checkpoint meta: stage={meta["stage"]}')
+    elif hasattr(cfg.train, 'pretrain') and cfg.train.pretrain:
+        if is_main_process():
+            logger.info(f'Load pretrain from {cfg.train.pretrain}')
+        model.load_pretrain_partial(cfg.train.pretrain)
 
-    train_loader = build_dataloader(train_dataset, **cfg.dataloader.train)
-    if not args.skip_validate:
-        val_dataset = build_dataset(cfg.data.val, logger)
-        val_loader = build_dataloader(val_dataset, **cfg.dataloader.val)
+    if dist.is_initialized():
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank,
+                    find_unused_parameters=True)
 
-    # train and val
-    logger.info('Training')
+    feat_2d_dir = cfg.get('feat_2d_dir', '')
+    d_2d = cfg.get('d_2d', 256)
+
+    train_raw = build_dataset(cfg.data.train, logger)
+    val_raw = build_dataset(cfg.data.val, logger)
+
+    _tmp_loader = build_dataloader(train_raw, **cfg.dataloader.train)
+    orig_collate = _tmp_loader.collate_fn
+    del _tmp_loader
+
+    if osp.isdir(feat_2d_dir):
+        train_dataset = wrap_dataset_with_2d_feats(train_raw, feat_2d_dir, d_2d=d_2d)
+        val_dataset = wrap_dataset_with_2d_feats(val_raw, feat_2d_dir, d_2d=d_2d)
+        collate_fn = collate_fn_wrapper(orig_collate)
+        if is_main_process():
+            logger.info(f'★ 2D features loaded from: {feat_2d_dir}')
+    else:
+        if is_main_process():
+            logger.warning(f'★ feat_2d_dir not found: {feat_2d_dir}, running WITHOUT 2D features')
+        train_dataset = train_raw
+        val_dataset = val_raw
+        collate_fn = orig_collate
+
+    # ---- DataLoader ----
+    train_cfg = dict(cfg.dataloader.train)
+
+    if dist.is_initialized():
+        train_sampler = DistributedSampler(train_dataset, shuffle=True)
+    else:
+        train_sampler = None
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=train_cfg.get('batch_size', 4),
+        shuffle=(train_sampler is None),
+        num_workers=train_cfg.get('num_workers', 4),
+        pin_memory=True,
+        collate_fn=collate_fn,
+        sampler=train_sampler,
+        persistent_workers=train_cfg.get('persistent_workers', False))
+
+    val_cfg = dict(cfg.dataloader.val)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=val_cfg.get('batch_size', 1),
+        shuffle=False,
+        num_workers=val_cfg.get('num_workers', 4),
+        collate_fn=collate_fn,
+        persistent_workers=val_cfg.get('persistent_workers', False))
+
+    # ---- Train Loop ----
+    if is_main_process():
+        logger.info('Training')
     best_AP = 0.0
-    save_file = None
+    best_file = None
+
     if args.eval_only:
-        eval_res = eval(0, model, val_loader, cfg, logger, writer)
-        exit()
+        eval(0, model, val_loader, cfg, logger, writer)
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        return
+
     for epoch in range(start_epoch, cfg.train.epochs + 1):
-        train(epoch, model, train_loader, optimizer, lr_scheduler, cfg, logger, writer)
+        train(epoch, model, train_loader, optimizer, lr_scheduler,
+              cfg, logger, writer, train_sampler)
+
         if not args.skip_validate and (epoch % cfg.train.interval == 0):
             eval_res = eval(epoch, model, val_loader, cfg, logger, writer)
-            if eval_res['all_ap'] > best_AP:
-                if save_file is not None:
-                    os.remove(save_file)
+
+            if is_main_process() and eval_res['all_ap'] > best_AP:
+                if best_file is not None and osp.exists(best_file):
+                    os.remove(best_file)
                 best_AP = eval_res['all_ap']
-                save_file = osp.join(cfg.work_dir, 'epoch{:03}_AP_{:.4f}_{:.4f}_{:.4f}.pth'.format(epoch, eval_res['all_ap'], eval_res['all_ap_50%'], eval_res['all_ap_25%']))
+                best_file = osp.join(
+                    cfg.work_dir,
+                    f'epoch{epoch:03d}_AP_{eval_res["all_ap"]:.4f}'
+                    f'_{eval_res["all_ap_50%"]:.4f}'
+                    f'_{eval_res["all_ap_25%"]:.4f}.pth')
                 meta = dict(epoch=epoch)
-                gorilla.save_checkpoint(model, save_file, optimizer, lr_scheduler, meta)
+                gorilla.save_checkpoint(
+                    get_model(model), best_file, optimizer, lr_scheduler, meta)
+                shutil.copy(best_file, osp.join(cfg.work_dir, 'best.pth'))
+                logger.info(f'★ New best AP: {best_AP:.4f} @ epoch {epoch}')
 
+        if is_main_process() and writer is not None:
+            writer.flush()
 
-        writer.flush()
+    if is_main_process():
+        logger.info(f'Training done! Best AP: {best_AP:.4f}')
+
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 if __name__ == '__main__':

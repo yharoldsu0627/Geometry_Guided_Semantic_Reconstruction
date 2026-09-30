@@ -44,13 +44,13 @@ The 2D feature extractor is outside this release. Put the projected per-superpoi
 The final configuration is `configs/scannet/geometry_guided_scannetv2.yaml`.
 
 ```bash
-python tools/train_earlyfusion.py configs/scannet/geometry_guided_scannetv2.yaml
+python tools/train.py configs/scannet/geometry_guided_scannetv2.yaml
 ```
 
 ## Evaluation
 
 ```bash
-python tools/test_earlyfusion.py \
+python tools/test.py \
   configs/scannet/geometry_guided_scannetv2.yaml \
   /path/to/checkpoint.pth \
   --out outputs/scannetv2_val
