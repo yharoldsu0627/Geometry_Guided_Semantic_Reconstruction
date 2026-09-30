@@ -39,8 +39,6 @@ class Relation3D(nn.Module):
         norm_eval=False,
         fix_module=[],
         d_2d=256,
-        diffusion=None,
-        ddim_steps_infer=20,
         feature_aux_mode='mask',
         mask_ratio=0.3,
         mask_loss_weight=1.0,
@@ -188,9 +186,6 @@ class Relation3D(nn.Module):
         self._init_input_modulation()
 
         # ===================== Stage =====================
-        self.stage = 1
-        self.ddim_steps_infer = ddim_steps_infer
-
         self.epoch = 0
         self.test_cfg = test_cfg
         self.norm_eval = norm_eval
@@ -211,14 +206,6 @@ class Relation3D(nn.Module):
         nn.init.constant_(last_linear.weight, 0)
         nn.init.constant_(last_linear.bias, 0)
 
-
-    def set_stage(self, stage):
-        """
-        """
-        if stage != 1:
-            raise ValueError(
-                f'Relation3D only supports stage=1, got stage={stage}')
-        self.stage = 1
 
     def train(self, mode=True):
         super().train(mode)
@@ -382,7 +369,7 @@ class Relation3D(nn.Module):
 
         batch_size = len(batch_offsets) - 1
         feat_2d_proxy = feat_2d.detach().clone().requires_grad_(True)
-        proxy_view = self._forward_stage1_view(
+        proxy_view = self._forward_view(
             voxel_coords, p2v_map, v2p_map, spatial_shape, feats,
             superpoints, coords_float, batch_offsets, feat_2d=feat_2d_proxy,
             insts=insts, apply_mask=False)
@@ -594,7 +581,7 @@ class Relation3D(nn.Module):
 
         return feat_2d_masked, mask_indices
 
-    def _forward_stage1_view(self, voxel_coords, p2v_map, v2p_map, spatial_shape,
+    def _forward_view(self, voxel_coords, p2v_map, v2p_map, spatial_shape,
                              feats, superpoints, coords_float, batch_offsets,
                              feat_2d=None, insts=None, apply_mask=True, mask_indices=None):
         batch_size = len(batch_offsets) - 1
@@ -699,7 +686,7 @@ class Relation3D(nn.Module):
             if mask_indices is None:
                 mask_indices = self._sample_random_mask_indices(feat_2d, batch_offsets)
 
-        primary_view = self._forward_stage1_view(
+        primary_view = self._forward_view(
             voxel_coords, p2v_map, v2p_map, spatial_shape, feats,
             superpoints, coords_float, batch_offsets, feat_2d=feat_2d,
             insts=insts, apply_mask=True, mask_indices=mask_indices)

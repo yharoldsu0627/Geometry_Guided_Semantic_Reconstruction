@@ -293,10 +293,6 @@ def main():
             meta = gorilla.resume(model, args.resume, optimizer, lr_scheduler)
             if isinstance(meta, dict) and 'epoch' in meta:
                 start_epoch = meta['epoch'] + 1
-        if isinstance(meta, dict) and 'stage' in meta and hasattr(model, 'set_stage'):
-            model.set_stage(meta['stage'])
-            if is_main_process():
-                logger.info(f'Set model stage from checkpoint meta: stage={meta["stage"]}')
     elif hasattr(cfg.train, 'pretrain') and cfg.train.pretrain:
         if is_main_process():
             logger.info(f'Load pretrain from {cfg.train.pretrain}')
