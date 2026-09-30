@@ -35,7 +35,15 @@ The CUDA extensions require a working CUDA toolkit and `nvcc`.
 
 ## Data preparation
 
-The repository does not include datasets, projected features, checkpoints, or experiment outputs. On the experiment machine, the prepared ScanNetV2 data is organized as:
+The repository does not include datasets, projected features, checkpoints, or experiment outputs. On `aids-111`, the prepared ScanNetV2 data is located at:
+
+```text
+/data1/users/suyuanhao/relation3d/datasets/scannet_v2
+```
+
+`/data1/users/suyuanhao/Relation3D-main/dataset/scannet_v2` is a symbolic link to the same directory. The path `/data1/user/suyuanhao` does not exist on this server.
+
+The current server copy contains 1,201 training scenes, 312 validation scenes, and 100 test scenes. It contains 1,513 projected 2D feature files, so scenes without a matching feature file must be generated before reproducing the full 2D-feature experiment. The prepared directory is organized as:
 
 ```text
 dataset/scannet_v2/
@@ -45,7 +53,10 @@ dataset/scannet_v2/
 ├── train/*_normals.pth
 ├── val/*_normals.pth
 ├── test/*_normals.pth
-└── feat_2d_sp/*.pt or *.pth
+├── train/*_superpoints.pth
+├── val/*_superpoints.pth
+├── test/*_superpoints.pth
+└── feat_2d_sp/*.pt
 ```
 
 Each `*_inst_nostuff.pth` contains the processed point coordinates, colors, superpoints, and labels. The normal files are loaded automatically by the ScanNetV2 loader. Each 2D feature file contains a tensor of shape `[num_superpoints, 256]`, with the filename matching the scene ID, for example `scene0000_00.pt`.
