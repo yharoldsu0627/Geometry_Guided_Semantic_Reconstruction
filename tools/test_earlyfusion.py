@@ -83,43 +83,9 @@ def get_args():
 
 def build_model(cfg):
     model_cfg = dict(cfg.model)
-    model_name = model_cfg.pop('name', 'Relation3DEarlyFusion')
+    model_name = model_cfg.pop('name', 'Relation3D')
     if model_name == 'Relation3D':
         from relation3d.model.relation3d import Relation3D as ModelClass
-    elif model_name == 'Relation3DEarlyFusion':
-        from relation3d.model.relation3d_earlyfusion import Relation3DEarlyFusion as ModelClass
-    elif model_name == 'Relation3DEarlyFusionInputMod':
-        from relation3d.model.relation3d_earlyfusion_inputmod import Relation3DEarlyFusionInputMod as ModelClass
-    elif model_name == 'Relation3DEarlyFusionInputModV2':
-        from relation3d.model.relation3d_earlyfusion_inputmod_v2 import Relation3DEarlyFusionInputModV2 as ModelClass
-    elif model_name == 'Relation3DEarlyFusionInputModBottleneck':
-        from relation3d.model.relation3d_earlyfusion_inputmod_bottleneck import (
-            Relation3DEarlyFusionInputModBottleneck as ModelClass,
-        )
-    elif model_name == 'Relation3DEarlyFusionInputModStage':
-        from relation3d.model.relation3d_earlyfusion_inputmod_stage import (
-            Relation3DEarlyFusionInputModStage as ModelClass,
-        )
-    elif model_name == 'Relation3DEarlyFusion2DMainPreMod':
-        from relation3d.model.relation3d_earlyfusion_2dmain_premod import (
-            Relation3DEarlyFusion2DMainPreMod as ModelClass,
-        )
-    elif model_name == 'Relation3DEarlyFusion2DMainAdd':
-        from relation3d.model.relation3d_earlyfusion_2dmain_add import (
-            Relation3DEarlyFusion2DMainAdd as ModelClass,
-        )
-    elif model_name == 'Relation3DEarlyFusion2DMainPostMod':
-        from relation3d.model.relation3d_earlyfusion_2dmain_postmod import (
-            Relation3DEarlyFusion2DMainPostMod as ModelClass,
-        )
-    elif model_name == 'Relation3DEarlyFusionInputModShift':
-        from relation3d.model.relation3d_earlyfusion_inputmod_shift import (
-            Relation3DEarlyFusionInputModShift as ModelClass,
-        )
-    elif model_name == 'Relation3DEarlyFusion2DMainPreModShift':
-        from relation3d.model.relation3d_earlyfusion_2dmain_premod_shift import (
-            Relation3DEarlyFusion2DMainPreModShift as ModelClass,
-        )
     else:
         raise ValueError(f'Unsupported model.name: {model_name}')
     return ModelClass(**model_cfg).cuda()

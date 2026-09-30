@@ -164,9 +164,7 @@ class ScanNet200Dataset(Dataset):
             scene_id = filename.split('/')[-1][:12]
             loaded = torch.load(filename, weights_only=False)
 
-            # 兼容当前本地两种格式:
             # 1) train/val: (xyz, rgb, superpoint, sem, inst)
-            # 2) 旧格式:    (xyz, rgb, sem, inst) + 独立 _superpoints.pth
             if isinstance(loaded, (list, tuple)):
                 if len(loaded) == 5:
                     xyz, rgb, superpoint, _, dummy_inst_label = loaded
@@ -178,8 +176,6 @@ class ScanNet200Dataset(Dataset):
             else:
                 raise ValueError(f'Unexpected labeled ScanNet200 sample type: {filename}, type={type(loaded)}')
 
-            # 语义标签优先从本地 scannet200 的 .npy 读取。
-            # 当前你的 .npy 是 [xyz(3), rgb(3), sem(1)] → shape [N, 7]
             split = filename.split('/')[-2]
             label_candidates = [
                 osp.join(self.data_root, split, f'{scene_id}.npy'),
@@ -199,7 +195,6 @@ class ScanNet200Dataset(Dataset):
                 dummy_inst_label = scannet200_labels[:, 11]
             elif scannet200_labels.shape[1] >= 7:
                 dummy_sem_label = scannet200_labels[:, 6]
-                # 当前本地 .npy 不含 instance id，沿用 pth 中已有的 instance id
             else:
                 raise ValueError(f'Unsupported ScanNet200 npy format for {label_path}: {scannet200_labels.shape}')
 

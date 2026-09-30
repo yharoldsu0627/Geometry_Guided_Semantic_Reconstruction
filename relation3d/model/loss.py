@@ -274,10 +274,8 @@
 #         # score loss
 #         score_loss = torch.tensor([0.0], device=pred_labels.device)
 
-#         # bbox loss — ★ 修复: 同时处理 1D tensor (dim<2) 和空 2D tensor (shape[0]==0)
 #         tgt_bboxes = torch.cat([inst.gt_bboxes[idx_gt] for inst, (_, idx_gt) in zip(insts, indices)])
 #         if tgt_bboxes.dim() < 2 or tgt_bboxes.shape[0] == 0:
-#             bbox_loss = pred_bboxes[idx].sum() * 0.0  # 保持梯度图连通，loss=0
 #         else:
 #             tgt_bboxes = tgt_bboxes[:, :3]
 #             bbox_loss = (pred_bboxes[idx] - tgt_bboxes).abs().sum(-1).mean()
@@ -352,10 +350,8 @@
 #         # score loss
 #         score_loss = torch.tensor([0.0], device=pred_labels.device)
 
-#         # bbox loss — ★ 修复: 同时处理 1D tensor (dim<2) 和空 2D tensor (shape[0]==0)
 #         tgt_bboxes = torch.cat([inst.gt_bboxes[idx_gt] for inst, (_, idx_gt) in zip(insts, indices)])
 #         if tgt_bboxes.dim() < 2 or tgt_bboxes.shape[0] == 0:
-#             bbox_loss = pred_bboxes[idx].sum() * 0.0  # 保持梯度图连通，loss=0
 #         else:
 #             tgt_bboxes = tgt_bboxes[:, :3]
 #             bbox_loss = (pred_bboxes[idx] - tgt_bboxes).abs().sum(-1).mean()
@@ -512,7 +508,7 @@ class HungarianMatcher(nn.Module):
 
 
 def _safe_bbox_loss(pred_bboxes, idx, insts, indices):
-    """★ 安全的 bbox loss: 处理空匹配 (1D tensor) 和空 2D tensor"""
+    """Documentation."""
     tgt_bboxes = torch.cat([inst.gt_bboxes[idx_gt] for inst, (_, idx_gt) in zip(insts, indices)])
     if tgt_bboxes.dim() < 2 or tgt_bboxes.shape[0] == 0:
         return pred_bboxes[idx].sum() * 0.0

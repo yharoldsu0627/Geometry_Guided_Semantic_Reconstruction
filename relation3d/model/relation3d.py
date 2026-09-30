@@ -68,10 +68,8 @@ class Relation3D(nn.Module):
         norm_eval=False,
         fix_module=[],
         d_2d=256,
-        # 保留旧参数仅为兼容旧配置，当前 active 版本只使用 stage1
         diffusion=None,
         ddim_steps_infer=20,
-        # ★ Stage 1 辅助任务参数
         feature_aux_mode='mask',
         mask_ratio=0.3,
         mask_loss_weight=1.0,
@@ -94,7 +92,6 @@ class Relation3D(nn.Module):
         self.num_class = num_class
         self.input_channel = input_channel
 
-        # ★ 辅助任务参数
         if feature_aux_mode not in ('mask', 'object', 'background', 'full'):
             raise ValueError(
                 "feature_aux_mode must be 'mask', 'object', 'background' or 'full', "
@@ -180,7 +177,6 @@ class Relation3D(nn.Module):
         self.criterion = Criterion(**criterion, num_class=num_class)
 
         # ===================== ★ Masked Feature Prediction Projector =====================
-        # backbone 输出 superpoint feat [M, media] → 预测被 mask 掉的 2D 特征 [M, d_2d]
         self.feat_projector = nn.Sequential(
             nn.Linear(media, media * 4),
             nn.GELU(),
@@ -234,7 +230,6 @@ class Relation3D(nn.Module):
             for param in mod.parameters():
                 param.requires_grad = False
 
-    # ===================== Stage 管理 =====================
 
     def _init_input_modulation(self):
         for module in self.input_modulation.modules():
@@ -248,11 +243,10 @@ class Relation3D(nn.Module):
 
     def set_stage(self, stage):
         """
-        Active 版本只保留 Stage 1.
         """
         if stage != 1:
             raise ValueError(
-                f'Relation3DEarlyFusion now only supports stage=1, got stage={stage}')
+                f'Relation3D only supports stage=1, got stage={stage}')
         self.stage = 1
 
     def train(self, mode=True):
@@ -345,14 +339,14 @@ class Relation3D(nn.Module):
                 scatter_softmax(rel_fea_max, superpoints, dim=0))
 
     def _apply_mask_indices(self, feat_2d, mask_indices):
-        """将给定 superpoint 索引处的 2D 特征置零。"""
+        """Documentation."""
         feat_2d_masked = feat_2d.clone()
         if mask_indices is not None and mask_indices.numel() > 0:
             feat_2d_masked[mask_indices] = 0.0
         return feat_2d_masked
 
     def _sample_random_mask_indices(self, feat_2d, batch_offsets):
-        """按 scene 随机采样被 mask 的 superpoint 索引。"""
+        """Documentation."""
         batch_size = len(batch_offsets) - 1
         mask_indices_list = []
 
@@ -377,8 +371,6 @@ class Relation3D(nn.Module):
     def _sample_saliency_mix_mask_indices(self, feat_2d, saliency, batch_offsets):
         """
         saliency-guided adaptive masking:
-        - 一部分 mask 位置由高 saliency superpoints 提供
-        - 剩余位置继续随机采样，避免输入分布被完全改坏
         """
         stats = {
             'adaptive_ratio': 0.0,
@@ -445,15 +437,10 @@ class Relation3D(nn.Module):
 
     def _mask_superpoint_feats(self, feat_2d, batch_offsets):
         """
-        随机 mask 掉一些超点的 2D 特征 (置零), 返回 mask 后的特征和 mask 索引。
 
         Args:
-            feat_2d: [M, d_2d] 超点级 2D 特征
-            batch_offsets: [B+1] batch 边界
 
         Returns:
-            feat_2d_masked: [M, d_2d] mask 后的特征 (被选中的超点特征置零)
-            mask_indices: [K] 被 mask 掉的超点全局索引
         """
         mask_indices = self._sample_random_mask_indices(feat_2d, batch_offsets)
         feat_2d_masked = self._apply_mask_indices(feat_2d, mask_indices)
@@ -463,8 +450,6 @@ class Relation3D(nn.Module):
                                     feats, insts, superpoints, coords_float, batch_offsets,
                                     sp_instance_labels, feat_2d):
         """
-        用主任务损失对 superpoint 2D 特征的梯度范数估计 token importance。
-        该 saliency 仅用于 mask 策略，不直接参与参数更新。
         """
         if (not self.training or feat_2d is None or self.feature_aux_mode != 'mask' or
                 self.feature_aux_mask_policy != 'saliency_mix' or self.mask_ratio <= 0 or
@@ -493,11 +478,7 @@ class Relation3D(nn.Module):
 
     def _compute_feature_aux_weights(self, mask_indices, insts, batch_offsets, sp_coords):
         """
-        根据 GT object mask 估计被 mask 超点的重要性:
-        - foreground superpoint 权重更高
-        - instance boundary superpoint 权重最高
 
-        该权重仅作用在辅助重建 loss，不改变 encoder 输入分布。
         """
         stats = {
             'fg_ratio': 0.0,
@@ -571,28 +552,19 @@ class Relation3D(nn.Module):
 
     def _compute_mask_prediction_loss(self, sp_feats, feat_2d_gt, mask_indices, mask_weights=None):
         """
-        用 projector 从 backbone 超点特征预测被 mask 的 2D 特征, 计算重建 loss。
 
         Args:
-            sp_feats: [M, media] backbone 输出的超点特征
-            feat_2d_gt: [M, d_2d] 原始未 mask 的 GT 2D 特征
-            mask_indices: [K] 被 mask 的超点索引
 
         Returns:
-            loss_mask: scalar, 重建 loss
-            cos_sim: float, mask 位置的平均 cosine similarity (用于监控)
         """
         if mask_indices.numel() == 0:
             return sp_feats.sum() * 0.0, 0.0
 
-        # 只在被 mask 的超点上做预测 (节省计算)
         pred_feat = self.feat_projector(sp_feats[mask_indices])   # [K, d_2d]
         gt_feat = feat_2d_gt[mask_indices]                         # [K, d_2d]
 
-        # token 级 smooth_l1，便于对 foreground / boundary 位置加权
         loss_l2 = F.smooth_l1_loss(pred_feat, gt_feat, reduction='none').mean(dim=-1)
 
-        # token 级 cosine similarity loss
         pred_norm = F.normalize(pred_feat, dim=-1)
         gt_norm = F.normalize(gt_feat, dim=-1)
         cos_sim_per = (pred_norm * gt_norm).sum(-1)
@@ -609,12 +581,9 @@ class Relation3D(nn.Module):
 
     def _mask_object_superpoint_feats(self, feat_2d, insts, batch_offsets):
         """
-        用 GT object-superpoint mask 在每个 object 内随机 mask 一部分 superpoint。
-        任务形式仍与原始 masked reconstruction 一致，只是把 mask 位置从随机改成 object-aware。
 
         Returns:
             feat_2d_masked: [M, d_2d]
-            mask_indices: [K] 被 mask 的超点全局索引
         """
         feat_2d_masked = feat_2d.clone()
         mask_indices_list = []
@@ -655,12 +624,9 @@ class Relation3D(nn.Module):
 
     def _mask_background_superpoint_feats(self, feat_2d, insts, batch_offsets):
         """
-        仅在背景 superpoint 上进行 mask，保留 object superpoints 不变。
-        背景定义为：不属于任何 GT object 的 superpoint。
 
         Returns:
             feat_2d_masked: [M, d_2d]
-            mask_indices: [K] 被 mask 的背景超点全局索引
         """
         feat_2d_masked = feat_2d.clone()
         mask_indices_list = []
@@ -858,12 +824,12 @@ class Relation3D(nn.Module):
             loss_dict['mask_policy_selected_saliency'] = mask_policy_stats.get(
                 'selected_saliency', 0.0)
 
-        loss_dict['loss'] = loss.item()  # 更新总 loss
+        loss_dict['loss'] = loss.item()
 
         return loss, loss_dict
 
     def _compute_clsr(self, sp_feats_update_list, sp_instance_labels, batch_offsets, batch_size):
-        """对比损失 CLSR"""
+        """Documentation."""
         sp_instance_label_m_list = []
         for i in range(batch_size):
             sp_instance_label = sp_instance_labels[i]

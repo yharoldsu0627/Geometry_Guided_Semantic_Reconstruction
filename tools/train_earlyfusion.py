@@ -36,10 +36,9 @@ from relation3d.model.dataset_2d_feats import (
 )
 
 
-# ===================== DDP 工具函数 =====================
 
 def setup_distributed():
-    """初始化分布式环境, 兼容单卡"""
+    """Documentation."""
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         rank = int(os.environ['RANK'])
         world_size = int(os.environ['WORLD_SIZE'])
@@ -48,7 +47,6 @@ def setup_distributed():
         torch.cuda.set_device(local_rank)
         return rank, world_size, local_rank
     else:
-        # 单卡模式
         return 0, 1, 0
 
 
@@ -59,14 +57,14 @@ def is_main_process():
 
 
 def get_model(model):
-    """获取 DDP 包装下的原始模型"""
+    """Documentation."""
     if isinstance(model, DDP):
         return model.module
     return model
 
 
 def reduce_tensor(tensor):
-    """所有进程求平均"""
+    """Documentation."""
     if not dist.is_initialized():
         return tensor
     rt = tensor.clone()
@@ -75,7 +73,6 @@ def reduce_tensor(tensor):
     return rt
 
 
-# ===================== 主逻辑 =====================
 
 def get_args():
     parser = argparse.ArgumentParser('Relation3D EarlyFusion Training (DDP)')
@@ -90,7 +87,6 @@ def get_args():
 
 def train(epoch, model, dataloader, optimizer, lr_scheduler, cfg, logger, writer, sampler):
     model.train()
-    # ★ DDP: 每个 epoch 设置 sampler 的 epoch, 保证 shuffle 不同
     if sampler is not None:
         sampler.set_epoch(epoch)
 
@@ -160,7 +156,6 @@ def eval(epoch, model, dataloader, cfg, logger, writer):
     if progress_bar is not None:
         progress_bar.close()
 
-    # ★ 只在 rank 0 上做评估 (val batch_size=1, 没有 DistributedSampler 时全量跑)
     eval_res = {'all_ap': 0.0, 'all_ap_50%': 0.0, 'all_ap_25%': 0.0}
     if is_main_process():
         logger.info('Evaluate instance segmentation')
@@ -179,7 +174,6 @@ def eval(epoch, model, dataloader, cfg, logger, writer):
         except Exception as e:
             logger.info(str(e))
 
-    # ★ 广播 AP 给所有进程 (用于 best model 判断)
     if dist.is_initialized():
         ap_tensor = torch.tensor([eval_res['all_ap']], device='cuda')
         dist.broadcast(ap_tensor, src=0)
@@ -209,7 +203,6 @@ def main():
     if is_main_process():
         os.makedirs(osp.abspath(cfg.work_dir), exist_ok=True)
 
-    # ★ 同步一下, 确保目录已创建
     if dist.is_initialized():
         dist.barrier()
 
@@ -224,53 +217,15 @@ def main():
 
     writer = SummaryWriter(cfg.work_dir) if is_main_process() else None
 
-    gorilla.set_random_seed(cfg.train.seed + rank)  # ★ 每个进程用不同种子
+    gorilla.set_random_seed(cfg.train.seed + rank)
     if is_main_process():
         logger.info(cfg)
 
     # ---- Model ----
     model_cfg = dict(cfg.model)
-    model_name = model_cfg.pop('name', 'Relation3DEarlyFusion')
+    model_name = model_cfg.pop('name', 'Relation3D')
     if model_name == 'Relation3D':
         from relation3d.model.relation3d import Relation3D as ModelClass
-    elif model_name == 'Relation3DEarlyFusion':
-        from relation3d.model.relation3d_earlyfusion import Relation3DEarlyFusion as ModelClass
-    elif model_name == 'Relation3DEarlyFusionInputMod':
-        from relation3d.model.relation3d_earlyfusion_inputmod import (
-            Relation3DEarlyFusionInputMod as ModelClass,
-        )
-    elif model_name == 'Relation3DEarlyFusionInputModV2':
-        from relation3d.model.relation3d_earlyfusion_inputmod_v2 import (
-            Relation3DEarlyFusionInputModV2 as ModelClass,
-        )
-    elif model_name == 'Relation3DEarlyFusionInputModBottleneck':
-        from relation3d.model.relation3d_earlyfusion_inputmod_bottleneck import (
-            Relation3DEarlyFusionInputModBottleneck as ModelClass,
-        )
-    elif model_name == 'Relation3DEarlyFusionInputModStage':
-        from relation3d.model.relation3d_earlyfusion_inputmod_stage import (
-            Relation3DEarlyFusionInputModStage as ModelClass,
-        )
-    elif model_name == 'Relation3DEarlyFusion2DMainPreMod':
-        from relation3d.model.relation3d_earlyfusion_2dmain_premod import (
-            Relation3DEarlyFusion2DMainPreMod as ModelClass,
-        )
-    elif model_name == 'Relation3DEarlyFusion2DMainAdd':
-        from relation3d.model.relation3d_earlyfusion_2dmain_add import (
-            Relation3DEarlyFusion2DMainAdd as ModelClass,
-        )
-    elif model_name == 'Relation3DEarlyFusion2DMainPostMod':
-        from relation3d.model.relation3d_earlyfusion_2dmain_postmod import (
-            Relation3DEarlyFusion2DMainPostMod as ModelClass,
-        )
-    elif model_name == 'Relation3DEarlyFusionInputModShift':
-        from relation3d.model.relation3d_earlyfusion_inputmod_shift import (
-            Relation3DEarlyFusionInputModShift as ModelClass,
-        )
-    elif model_name == 'Relation3DEarlyFusion2DMainPreModShift':
-        from relation3d.model.relation3d_earlyfusion_2dmain_premod_shift import (
-            Relation3DEarlyFusion2DMainPreModShift as ModelClass,
-        )
     else:
         raise ValueError(f'Unsupported model.name: {model_name}')
 
@@ -282,7 +237,6 @@ def main():
         count_parameters = gorilla.parameter_count(model)['']
         logger.info(f'Parameters: {count_parameters / 1e6:.2f}M')
 
-    # ---- Optimizer (在 DDP 包装之前构建) ----
     optimizer = gorilla.build_optimizer(model, cfg.optimizer)
     lr_scheduler = gorilla.build_lr_scheduler(optimizer, cfg.lr_scheduler)
 
@@ -319,19 +273,16 @@ def main():
             logger.info(f'Load pretrain from {cfg.train.pretrain}')
         model.load_pretrain_partial(cfg.train.pretrain)
 
-    # ★ DDP 包装
     if dist.is_initialized():
         model = DDP(model, device_ids=[local_rank], output_device=local_rank,
                     find_unused_parameters=True)
 
-    # ---- Dataset: 包装 2D 特征 ----
     feat_2d_dir = cfg.get('feat_2d_dir', '')
     d_2d = cfg.get('d_2d', 256)
 
     train_raw = build_dataset(cfg.data.train, logger)
     val_raw = build_dataset(cfg.data.val, logger)
 
-    # 获取原始 collate_fn
     _tmp_loader = build_dataloader(train_raw, **cfg.dataloader.train)
     orig_collate = _tmp_loader.collate_fn
     del _tmp_loader
@@ -352,7 +303,6 @@ def main():
     # ---- DataLoader ----
     train_cfg = dict(cfg.dataloader.train)
 
-    # ★ DDP: 使用 DistributedSampler 替代 shuffle
     if dist.is_initialized():
         train_sampler = DistributedSampler(train_dataset, shuffle=True)
     else:
@@ -361,14 +311,13 @@ def main():
     train_loader = DataLoader(
         train_dataset,
         batch_size=train_cfg.get('batch_size', 4),
-        shuffle=(train_sampler is None),  # ★ 有 sampler 时不能 shuffle
+        shuffle=(train_sampler is None),
         num_workers=train_cfg.get('num_workers', 4),
         pin_memory=True,
         collate_fn=collate_fn,
         sampler=train_sampler,
         persistent_workers=train_cfg.get('persistent_workers', False))
 
-    # ★ 验证集: 只在 rank 0 跑全量, 不做分布式切分
     val_cfg = dict(cfg.dataloader.val)
     val_loader = DataLoader(
         val_dataset,
