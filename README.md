@@ -100,12 +100,28 @@ The final configuration is `configs/scannet/geometry_guided_scannetv2.yaml`.
 python tools/train.py configs/scannet/geometry_guided_scannetv2.yaml
 ```
 
+## Pretrained checkpoint
+
+The ScanNetV2 checkpoint used for the reported result is:
+
+```text
+relation3d(ours)_scannetv2.pth
+```
+
+Download it from [Baidu Netdisk](https://pan.baidu.com/s/1Kas-JmRnAEVv3HD5D3Bz_w?pwd=wgvk) and use extraction password `wgvk`. After extraction, place the file at:
+
+```text
+checkpoints/relation3d(ours)_scannetv2.pth
+```
+
+The `checkpoints/` directory is local-only and is not included in this repository.
+
 ## Evaluation
 
 ```bash
 python tools/test.py \
   configs/scannet/geometry_guided_scannetv2.yaml \
-  /path/to/checkpoint.pth \
+  'checkpoints/relation3d(ours)_scannetv2.pth' \
   --out outputs/scannetv2_val
 ```
 
