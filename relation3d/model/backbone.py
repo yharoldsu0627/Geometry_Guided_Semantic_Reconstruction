@@ -8,17 +8,6 @@ from spconv.core import ConvAlgo
 from spconv.pytorch.modules import SparseModule
 from torch import nn
 from typing import Callable, Dict, List, Optional, Union
-
-
-def _debug_cuda_sync(tag: str):
-    flag = os.environ.get('RELATION3D_DEBUG_SYNC', '0').lower()
-    if flag not in {'1', 'true', 'yes'}:
-        return
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    print(f'[debug-sync] {tag}', flush=True)
-
-
 _SPCONV_ALGO_REPORTED = False
 
 
@@ -151,9 +140,7 @@ class ResidualBlock(SparseModule):
         )
 
         output = self.conv_branch(input)
-        _debug_cuda_sync('ResidualBlock.conv_branch')
         output = output.replace_feature(output.features + self.i_branch(identity).features)
-        _debug_cuda_sync('ResidualBlock.i_branch')
         # output.features += self.i_branch(identity).features
 
         return output
@@ -263,7 +250,6 @@ class UBlock(nn.Module):
 
     def forward(self, input, previous_outputs: Optional[List] = None):
         output = self.blocks(input)
-        _debug_cuda_sync(f'UBlock.blocks.nPlanes={self.nPlanes}')
         identity = spconv.SparseConvTensor(
             output.features,
             output.indices,
@@ -274,20 +260,16 @@ class UBlock(nn.Module):
 
         if len(self.nPlanes) > 1:
             output_decoder = self.conv(output)
-            _debug_cuda_sync(f'UBlock.conv.nPlanes={self.nPlanes}')
             if self.return_blocks:
                 output_decoder, previous_outputs = self.u(output_decoder, previous_outputs)
             else:
                 output_decoder = self.u(output_decoder)
-            _debug_cuda_sync(f'UBlock.u.nPlanes={self.nPlanes}')
             output_decoder = self.deconv(output_decoder)
-            _debug_cuda_sync(f'UBlock.deconv.nPlanes={self.nPlanes}')
 
             output = output.replace_feature(torch.cat((identity.features, output_decoder.features), dim=1))
             # output.features = torch.cat((identity.features, output_decoder.features), dim=1)
 
             output = self.blocks_tail(output)
-            _debug_cuda_sync(f'UBlock.blocks_tail.nPlanes={self.nPlanes}')
 
         if self.return_blocks:
             # NOTE: to avoid the residual bug

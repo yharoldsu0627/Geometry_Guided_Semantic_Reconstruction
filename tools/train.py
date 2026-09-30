@@ -36,6 +36,35 @@ from relation3d.model.dataset_2d_feats import (
 )
 
 
+def load_compatible_pretrain(model, checkpoint_path, logger):
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    if isinstance(checkpoint, dict) and 'model' in checkpoint:
+        state_dict = checkpoint['model']
+    elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+        state_dict = checkpoint['state_dict']
+    else:
+        state_dict = checkpoint
+
+    model_state = model.state_dict()
+    compatible = {}
+    skipped = []
+    for key, value in state_dict.items():
+        model_key = key[7:] if key.startswith('module.') else key
+        if (
+            model_key in model_state
+            and hasattr(value, 'shape')
+            and model_state[model_key].shape == value.shape
+        ):
+            compatible[model_key] = value
+        else:
+            skipped.append(model_key)
+    missing, unexpected = model.load_state_dict(compatible, strict=False)
+    logger.info(
+        f'Loaded {len(compatible)} compatible tensors from {checkpoint_path}; '
+        f'skipped {len(skipped)}, missing {len(missing)}, unexpected {len(unexpected)}'
+    )
+
+
 
 def setup_distributed():
     """Documentation."""
@@ -271,7 +300,7 @@ def main():
     elif hasattr(cfg.train, 'pretrain') and cfg.train.pretrain:
         if is_main_process():
             logger.info(f'Load pretrain from {cfg.train.pretrain}')
-        model.load_pretrain_partial(cfg.train.pretrain)
+        load_compatible_pretrain(model, cfg.train.pretrain, logger)
 
     if dist.is_initialized():
         model = DDP(model, device_ids=[local_rank], output_device=local_rank,

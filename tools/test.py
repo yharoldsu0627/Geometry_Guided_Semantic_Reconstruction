@@ -284,8 +284,7 @@ def main():
     logger.info(f'Load state dict from {args.checkpoint}')
     ckpt = torch.load(args.checkpoint, map_location='cpu')
     state_dict = ckpt.get('model', ckpt.get('state_dict', ckpt))
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    logger.info(f'Checkpoint loaded. Missing={len(missing)}, Unexpected={len(unexpected)}')
+    model.load_state_dict(state_dict, strict=False)
 
     feat_2d_dir = cfg.get('feat_2d_dir', '')
     d_2d = cfg.get('d_2d', 256)

@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_scatter import scatter_max, scatter_mean, scatter_sum, scatter_softmax
-import os
 from relation3d.utils import cuda_cast, rle_encode
 from .backbone import ResidualBlock, UBlock, MLP, get_relation3d_spconv_algo
 from .loss import Criterion
@@ -17,37 +16,9 @@ import seaborn as sns
 from sklearn.manifold import TSNE
 from sklearn.preprocessing import LabelEncoder
 
-def _debug_cuda_sync(tag: str):
-    flag = os.environ.get('RELATION3D_DEBUG_SYNC', '0').lower()
-    if flag not in {'1', 'true', 'yes'}:
-        return
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    print(f'[debug-sync] {tag}', flush=True)
-
-
 def apply_sparse_film(x, mod_params):
     scale, shift = mod_params.chunk(2, dim=-1)
     return x.replace_feature(x.features * (1 + scale) + shift)
-
-
-
-
-import functools
-import gorilla
-import pointgroup_ops
-import spconv.pytorch as spconv
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch_scatter import scatter_max, scatter_mean, scatter_sum, scatter_softmax
-import numpy as np
-
-from relation3d.utils import cuda_cast, rle_encode
-from .backbone import ResidualBlock, UBlock, MLP, get_relation3d_spconv_algo
-from .loss import Criterion
-from .query_decoder import QueryDecoder
-
 
 @gorilla.MODELS.register_module()
 class Relation3D(nn.Module):
@@ -256,44 +227,6 @@ class Relation3D(nn.Module):
                 if isinstance(m, nn.BatchNorm1d):
                     m.eval()
 
-    # ===================== Pretrain Loading =====================
-
-    def load_pretrain_partial(self, pretrain_path):
-        ckpt = torch.load(pretrain_path, map_location='cpu')
-        if 'model' in ckpt:
-            state_dict = ckpt['model']
-        elif 'state_dict' in ckpt:
-            state_dict = ckpt['state_dict']
-        else:
-            state_dict = ckpt
-
-        model_state = self.state_dict()
-        compatible = {}
-        skipped = []
-        for key, value in state_dict.items():
-            model_key = key[7:] if key.startswith('module.') else key
-            if (
-                model_key in model_state
-                and hasattr(value, 'shape')
-                and model_state[model_key].shape == value.shape
-            ):
-                compatible[model_key] = value
-            else:
-                skipped.append(model_key)
-
-        missing, unexpected = self.load_state_dict(compatible, strict=False)
-        print(f'[2DMainPreMod] Loaded pretrain from {pretrain_path}')
-        print(
-            f'[2DMainPreMod] Compatible tensors: {len(compatible)}, '
-            f'skipped: {len(skipped)}'
-        )
-        if missing:
-            print(f'[2DMainPreMod] Missing keys ({len(missing)}): '
-                  f'{missing[:5]}{"..." if len(missing) > 5 else ""}')
-        if unexpected:
-            print(f'[2DMainPreMod] Unexpected keys ({len(unexpected)}): '
-                  f'{unexpected[:5]}{"..." if len(unexpected) > 5 else ""}')
-
     def forward(self, batch, mode='loss'):
         if mode == 'loss':
             return self.loss(**batch)
@@ -305,34 +238,25 @@ class Relation3D(nn.Module):
     def extract_feat(self, x, superpoints, p2v_map, sp_coords, coords_float, voxel_cond3d=None):
         if voxel_cond3d is not None:
             mod_params = self.input_modulation(voxel_cond3d)
-            _debug_cuda_sync('2dmain_premod.input_modulation')
             x = apply_sparse_film(x, mod_params)
-            _debug_cuda_sync('2dmain_premod.apply_sparse_film')
 
         x = self.input_conv(x)
-        _debug_cuda_sync('2dmain_premod.input_conv')
         x, _ = self.unet(x)
-        _debug_cuda_sync('2dmain_premod.unet')
         x = self.output_layer(x)
-        _debug_cuda_sync('2dmain_premod.output_layer')
         x = x.features[p2v_map.long()]
-        _debug_cuda_sync('2dmain_premod.p2v_gather')
 
         x_origin = x.clone()
         x = scatter_mean(x_origin, superpoints, dim=0)
-        _debug_cuda_sync('2dmain_premod.scatter_mean')
         rel_fea_mean = self.pooling_linear((x[superpoints] - x_origin))
         x_mean = scatter_sum(
             scatter_softmax(rel_fea_mean, superpoints, dim=0) * x_origin,
             superpoints, dim=0)
         x, _ = scatter_max(x_origin, superpoints, dim=0)
-        _debug_cuda_sync('2dmain_premod.scatter_max')
         rel_fea_max = self.pooling_linear1((x[superpoints] - x_origin))
         x_max = scatter_sum(
             scatter_softmax(rel_fea_max, superpoints, dim=0) * x_origin,
             superpoints, dim=0)
         x = self.mlp(torch.cat([x_mean, x_max], dim=-1))
-        _debug_cuda_sync('2dmain_premod.final_mlp')
 
         return (x,
                 scatter_softmax(rel_fea_mean, superpoints, dim=0),
@@ -675,14 +599,11 @@ class Relation3D(nn.Module):
                              feat_2d=None, insts=None, apply_mask=True, mask_indices=None):
         batch_size = len(batch_offsets) - 1
         sp_coords = scatter_mean(coords_float, superpoints, dim=0)
-        _debug_cuda_sync('2dmain_premod.sp_coords')
 
         voxel_2d = None
         voxel_cond3d = pointgroup_ops.voxelization(feats.contiguous(), v2p_map)
-        _debug_cuda_sync('2dmain_premod.voxel_cond3d')
         if feat_2d is not None:
             feat_2d_gt = feat_2d.clone()
-            _debug_cuda_sync('2dmain_premod.feat_2d_clone')
             if self.feature_aux_mode == 'full':
                 feat_2d_point = feat_2d[superpoints]
                 if self.training:
@@ -725,7 +646,6 @@ class Relation3D(nn.Module):
                     mask_indices = None
 
             voxel_2d = pointgroup_ops.voxelization(feat_2d_point.contiguous(), v2p_map)
-            _debug_cuda_sync('2dmain_premod.voxel_2d')
         else:
             feat_2d_gt = None
             mask_indices = None
@@ -738,10 +658,8 @@ class Relation3D(nn.Module):
             batch_size,
             force_algo=get_relation3d_spconv_algo(),
         )
-        _debug_cuda_sync('2dmain_premod.input_tensor')
         sp_feats, _, _ = self.extract_feat(
             input_tensor, superpoints, p2v_map, sp_coords, coords_float, voxel_cond3d=voxel_cond3d)
-        _debug_cuda_sync('2dmain_premod.extract_feat_done')
 
         feature_aux_loss = torch.tensor(0.0, device=sp_feats.device)
         feature_aux_metric = 0.0
@@ -755,7 +673,6 @@ class Relation3D(nn.Module):
 
         out, sp_feats_update_list, _ = self.decoder(
             sp_feats, sp_coords, batch_offsets, self.epoch)
-        _debug_cuda_sync('2dmain_premod.decoder')
         return {
             'out': out,
             'sp_feats_update_list': sp_feats_update_list,

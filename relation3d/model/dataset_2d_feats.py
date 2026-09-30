@@ -7,10 +7,6 @@ import os
 import torch
 from torch.utils.data import Dataset
 
-DEBUG = False
-_debug_count = 0
-
-
 class FeatureDatasetWrapper(Dataset):
     """
       (scan_id, coords, feats, normals, superpoints, insts, coords_float, sp_inst_labels)
@@ -30,17 +26,10 @@ class FeatureDatasetWrapper(Dataset):
         if hasattr(base_dataset, 'CLASSES'):
             self.CLASSES = base_dataset.CLASSES
 
-        if DEBUG:
-            pt_files = [f for f in os.listdir(feat_dir) if f.endswith('.pt')]
-            pth_files = [f for f in os.listdir(feat_dir) if f.endswith('.pth')]
-            print(f'[DEBUG dataset] feat_dir={feat_dir}')
-            print(f'[DEBUG dataset]   .pt files: {len(pt_files)}, .pth files: {len(pth_files)}')
-
     def __len__(self):
         return len(self.base_dataset)
 
     def __getitem__(self, idx):
-        global _debug_count
         data = self.base_dataset[idx]
 
         feature_indices = None
@@ -56,13 +45,6 @@ class FeatureDatasetWrapper(Dataset):
         n_sp = data[7].shape[0] if hasattr(data[7], 'shape') else 0
 
         feat_2d = self._load_feat(scan_id, n_sp, feature_indices)
-
-        if DEBUG and _debug_count < 3:
-            print(f'[DEBUG dataset] idx={idx}, scan_id={scan_id}, '
-                  f'n_sp={n_sp}, feat_2d={list(feat_2d.shape)}, '
-                  f'min={feat_2d.min():.4f}, max={feat_2d.max():.4f}, '
-                  f'nonzero={feat_2d.abs().sum():.2f}')
-            _debug_count += 1
 
         return data + (feat_2d,)
 
@@ -111,8 +93,6 @@ class FeatureDatasetWrapper(Dataset):
             raise FileNotFoundError(
                 f'No 2D superpoint feature file found for {scan_id} in {self.feat_dir}'
             )
-        if DEBUG and _debug_count < 5:
-            print(f'[DEBUG dataset] WARNING: not found for {scan_id}')
         return torch.zeros(max(n_sp, 1), self.d_2d, dtype=torch.float32)
 
     def __getattr__(self, name):
