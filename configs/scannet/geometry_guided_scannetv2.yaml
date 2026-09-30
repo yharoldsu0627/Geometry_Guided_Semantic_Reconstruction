@@ -54,7 +54,7 @@ feat_2d_dir: dataset/scannet_v2/feat_2d_sp
 d_2d: 256
 
 model:
-  name: Relation3DEarlyFusion2DMainPreMod
+  name: Relation3D
   input_channel: 9
   blocks: 5
   block_reps: 2

@@ -10,6 +10,8 @@ This repository contains the reproducible implementation of our 3D instance segm
 
 The release contains source code, ScanNetV2 preprocessing utilities, training and evaluation entry points, and the final experiment configuration. Datasets, DINO features, checkpoints, logs, prediction masks, and other experiment artifacts are intentionally excluded.
 
+The final model is implemented as the single `Relation3D` class in `relation3d/model/relation3d.py`. The two early-fusion files remain as compatibility import paths for existing scripts.
+
 ## Environment
 
 ```bash

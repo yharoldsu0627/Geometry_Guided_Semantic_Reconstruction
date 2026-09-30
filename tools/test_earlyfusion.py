@@ -84,7 +84,9 @@ def get_args():
 def build_model(cfg):
     model_cfg = dict(cfg.model)
     model_name = model_cfg.pop('name', 'Relation3DEarlyFusion')
-    if model_name == 'Relation3DEarlyFusion':
+    if model_name == 'Relation3D':
+        from relation3d.model.relation3d import Relation3D as ModelClass
+    elif model_name == 'Relation3DEarlyFusion':
         from relation3d.model.relation3d_earlyfusion import Relation3DEarlyFusion as ModelClass
     elif model_name == 'Relation3DEarlyFusionInputMod':
         from relation3d.model.relation3d_earlyfusion_inputmod import Relation3DEarlyFusionInputMod as ModelClass
