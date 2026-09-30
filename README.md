@@ -79,9 +79,6 @@ data:
 feat_2d_dir: dataset/scannet_v2/feat_2d_sp
 ```
 
-Change `data_root` to the directory containing the `train`, `val`, and `test` folders. Change `feat_2d_dir` to the directory containing the projected superpoint features. Set `train.pretrain` to a compatible checkpoint or set it to an empty string when no pretraining checkpoint is available. `work_dir` controls logs, TensorBoard files, and saved checkpoints.
-
-The final method uses `feature_aux_mode: background` and `background_mask_ratio: 0.1`. Keep `d_2d: 256` unless the projected feature dimension and the model configuration are changed together. If the 2D feature directory is missing, the code runs without 2D features and does not reproduce the reported method.
 
 ## Training
 
