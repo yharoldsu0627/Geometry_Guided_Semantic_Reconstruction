@@ -6,12 +6,6 @@ Yuanhao Su, Shaofeng Zhang
 
 University of Science and Technology of China, Fuzhou University
 
-This repository contains the reproducible implementation of our 3D instance segmentation method. The model augments a Relation3D-style 3D decoder with lifted 2D features and geometry-guided semantic reconstruction.
-
-The release contains source code, ScanNetV2 preprocessing utilities, training and evaluation entry points, and the final experiment configuration. Datasets, DINO features, checkpoints, logs, prediction masks, and other experiment artifacts are intentionally excluded.
-
-The final model is implemented as the single `Relation3D` class in `relation3d/model/relation3d.py`.
-
 ## Repository structure
 
 ```text
@@ -105,13 +99,3 @@ python tools/test.py \
 ```
 
 The configuration uses the 18 ScanNetV2 instance classes and the same preprocessing and evaluation protocol as the reported result.
-
-## Citation
-
-```bibtex
-@inproceedings{geometryguided2026,
-  title     = {Geometry-Guided Semantic Reconstruction for 3D Instance Segmentation},
-  booktitle = {Advances in Neural Information Processing Systems},
-  year      = {2026}
-}
-```
