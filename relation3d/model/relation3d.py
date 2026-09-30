@@ -17,6 +17,7 @@ from sklearn.manifold import TSNE
 from sklearn.preprocessing import LabelEncoder
 
 def apply_sparse_film(x, mod_params):
+    # Modulate 2D voxel features: F_out = F_2D * (1 + scale) + shift.
     scale, shift = mod_params.chunk(2, dim=-1)
     return x.replace_feature(x.features * (1 + scale) + shift)
 
@@ -172,6 +173,7 @@ class Relation3D(nn.Module):
             )
         )
 
+        # Predict per-channel scale and shift from 3D voxel features.
         cond_layers = []
         if self.input_mod_use_layernorm:
             cond_layers.append(nn.LayerNorm(self.input_channel))
@@ -185,7 +187,6 @@ class Relation3D(nn.Module):
         self.input_modulation = nn.Sequential(*cond_layers)
         self._init_input_modulation()
 
-        # ===================== Stage =====================
         self.epoch = 0
         self.test_cfg = test_cfg
         self.norm_eval = norm_eval
@@ -224,6 +225,7 @@ class Relation3D(nn.Module):
 
     def extract_feat(self, x, superpoints, p2v_map, sp_coords, coords_float, voxel_cond3d=None):
         if voxel_cond3d is not None:
+            # Use 3D geometry to modulate 2D semantics before the sparse encoder.
             mod_params = self.input_modulation(voxel_cond3d)
             x = apply_sparse_film(x, mod_params)
 
@@ -462,12 +464,7 @@ class Relation3D(nn.Module):
         return mask_weights, stats
 
     def _compute_mask_prediction_loss(self, sp_feats, feat_2d_gt, mask_indices, mask_weights=None):
-        """
-
-        Args:
-
-        Returns:
-        """
+        """Reconstruct masked 2D features from encoded 3D superpoint features."""
         if mask_indices.numel() == 0:
             return sp_feats.sum() * 0.0, 0.0
 
@@ -481,6 +478,7 @@ class Relation3D(nn.Module):
         cos_sim_per = (pred_norm * gt_norm).sum(-1)
         loss_cos = 1.0 - cos_sim_per
 
+        # Combine Smooth L1 and cosine losses at masked positions only.
         per_token_loss = loss_l2 + loss_cos
         if mask_weights is not None:
             weights = mask_weights.to(per_token_loss.dtype)
@@ -534,11 +532,7 @@ class Relation3D(nn.Module):
         return feat_2d_masked, mask_indices
 
     def _mask_background_superpoint_feats(self, feat_2d, insts, batch_offsets):
-        """
-
-        Returns:
-            feat_2d_masked: [M, d_2d]
-        """
+        """Zero selected background 2D features and keep object features intact."""
         feat_2d_masked = feat_2d.clone()
         mask_indices_list = []
         batch_size = len(batch_offsets) - 1
@@ -557,12 +551,14 @@ class Relation3D(nn.Module):
                 if gt_spmasks.dim() == 1:
                     gt_spmasks = gt_spmasks.unsqueeze(0)
                 gt_spmasks = (gt_spmasks.to(feat_2d.device) > 0.5)
+                # Background superpoints belong to no GT instance.
                 bg_mask = ~gt_spmasks.any(dim=0)
 
             bg_idx_local = torch.nonzero(bg_mask, as_tuple=False).view(-1)
             if bg_idx_local.numel() == 0 or self.background_mask_ratio <= 0:
                 continue
 
+            # Randomly select background superpoints, or mask all at ratio 1.
             if self.background_mask_ratio >= 1.0:
                 mask_local = bg_idx_local
             else:
@@ -588,8 +584,10 @@ class Relation3D(nn.Module):
         sp_coords = scatter_mean(coords_float, superpoints, dim=0)
 
         voxel_2d = None
+        # Pool raw 3D features into voxels as modulation conditions.
         voxel_cond3d = pointgroup_ops.voxelization(feats.contiguous(), v2p_map)
         if feat_2d is not None:
+            # Keep unmasked 2D features as reconstruction targets.
             feat_2d_gt = feat_2d.clone()
             if self.feature_aux_mode == 'full':
                 feat_2d_point = feat_2d[superpoints]
@@ -610,6 +608,7 @@ class Relation3D(nn.Module):
                     feat_2d_point = feat_2d[superpoints]
                     mask_indices = None
             elif self.feature_aux_mode == 'background':
+                # Mask background semantics during training only.
                 if self.training and apply_mask and self.background_mask_ratio > 0:
                     if mask_indices is None:
                         feat_2d_aux, mask_indices = self._mask_background_superpoint_feats(
@@ -632,6 +631,7 @@ class Relation3D(nn.Module):
                     feat_2d_point = feat_2d[superpoints]
                     mask_indices = None
 
+            # Voxelize 2D features after masking for the sparse encoder.
             voxel_2d = pointgroup_ops.voxelization(feat_2d_point.contiguous(), v2p_map)
         else:
             feat_2d_gt = None
@@ -658,6 +658,7 @@ class Relation3D(nn.Module):
                 feature_aux_loss, feature_aux_metric = self._compute_mask_prediction_loss(
                     sp_feats, feat_2d_gt, mask_indices, mask_weights=mask_weights)
 
+        # Decode instances from encoder features, not reconstructed 2D features.
         out, sp_feats_update_list, _ = self.decoder(
             sp_feats, sp_coords, batch_offsets, self.epoch)
         return {
@@ -699,6 +700,7 @@ class Relation3D(nn.Module):
         loss, loss_dict = self.criterion(out, insts, loss_sim)
         loss_dict.update(loss_out)
 
+        # Add semantic reconstruction to the instance segmentation objective.
         loss = loss + self.mask_loss_weight * feature_aux_loss
         if self.feature_aux_mode == 'full':
             loss_dict['full_pred_loss'] = feature_aux_loss.item()
