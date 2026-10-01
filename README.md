@@ -114,3 +114,17 @@ python tools/test.py \
 ```
 
 The configuration uses the 18 ScanNetV2 instance classes and the same preprocessing and evaluation protocol as the reported result.
+
+## Acknowledgements
+
+This project is built upon the Relation3D codebase. We thank the authors for their open-source implementation and relation modeling framework. Please also cite the original [Relation3D repository](https://github.com/Howard-coder191/Relation3D) when using this code.
+
+```bibtex
+@inproceedings{lu2025relation3d,
+  title={Relation3D: Enhancing Relation Modeling for Point Cloud Instance Segmentation},
+  author={Lu, Jiahao and Deng, Jiacheng},
+  booktitle={Proceedings of the Computer Vision and Pattern Recognition Conference},
+  pages={8889--8899},
+  year={2025}
+}
+```
